@@ -18,6 +18,24 @@ use sqlx::PgPool;
 use std::str::FromStr;
 use tracing::error;
 
+/// Returns true if the event is currently active (not yet ended).
+/// An event is active if:
+/// - it has no interval_period, OR
+/// - it has no duration (open-ended), OR
+/// - start + duration > now
+fn is_event_active(event: &Event) -> bool {
+    match &event.content.interval_period {
+        None => true,
+        Some(ip) => match &ip.duration {
+            None => true,
+            Some(dur) => {
+                let end = ip.start + dur.to_chrono_at_datetime(ip.start);
+                end > Utc::now()
+            }
+        },
+    }
+}
+
 #[async_trait]
 impl EventCrud for PgEventStorage {}
 
@@ -269,7 +287,16 @@ impl Crud for PgEventStorage {
         .await?
         .into_iter()
         .map(TryInto::try_into)
-        .collect::<Result<_, _>>()?)
+        .collect::<Result<Vec<Event>, _>>()?;
+
+        // Post-filter by active status if requested
+        let events = match filter.active {
+            Some(true) => events.into_iter().filter(|e| is_event_active(e)).collect(),
+            Some(false) => events.into_iter().filter(|e| !is_event_active(e)).collect(),
+            None => events,
+        };
+
+        Ok(events)
     }
 
     async fn update(
@@ -380,6 +407,7 @@ mod tests {
                 },
                 skip: 0,
                 limit: 50,
+                active: None,
             }
         }
     }

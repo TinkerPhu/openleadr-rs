@@ -96,6 +96,10 @@ pub struct QueryParams {
     #[validate(range(min = 1, max = 50))]
     #[serde(default = "get_50")]
     pub(crate) limit: i64,
+    /// Filter by active status. If `true`, only return events that are currently active
+    /// (no interval_period, no duration, or end time in the future). If `false`, only
+    /// return past events. If absent, return all events.
+    pub(crate) active: Option<bool>,
 }
 
 fn get_50() -> i64 {
