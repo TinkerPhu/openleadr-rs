@@ -244,7 +244,7 @@ impl Crud for PgEventStorage {
         let target: Option<TargetEntry> = filter.targets.clone().into();
         let target_values = target.as_ref().map(|t| t.values.clone());
 
-        Ok(sqlx::query_as!(
+        let events = sqlx::query_as!(
             PostgresEvent,
             r#"
             SELECT e.*
@@ -252,21 +252,21 @@ impl Crud for PgEventStorage {
               JOIN program p on p.id = e.program_id
               LEFT JOIN ven_program vp ON p.id = vp.program_id
               LEFT JOIN LATERAL (
-                  
+
                     SELECT targets.e_id,
                            (t ->> 'type' = $2) AND
                            (t -> 'values' ?| $3) AS target_test
                     FROM (SELECT event.id                            AS e_id,
                                  jsonb_array_elements(event.targets) AS t
                           FROM event) AS targets
-                  
+
                   )
                   ON e.id = e_id
             WHERE ($1::text IS NULL OR e.program_id like $1)
               AND ($2 IS NULL OR $3 IS NULL OR target_test)
               AND (
                   ($4 AND (vp.ven_id IS NULL OR vp.ven_id = ANY($5)))
-                  OR 
+                  OR
                   ($6 AND ($7::text[] IS NULL OR p.business_id = ANY ($7)))
                   )
             GROUP BY e.id, e.priority, e.created_date_time
