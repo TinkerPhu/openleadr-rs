@@ -3,16 +3,27 @@ FROM rust:1.90-alpine AS base
 # Install build dependencies
 RUN apk add --no-cache alpine-sdk openssl-dev openssl-libs-static
 
-FROM base AS builder
-
-ADD . /app
+# --- Stage 1: planner (extract dependency recipe) ---
+FROM base AS planner
+RUN cargo install cargo-chef
 WORKDIR /app
 COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Don't depend on live sqlx during build use cached .sqlx
+# --- Stage 2: cook (compile dependencies only — cached as Docker layer) ---
+FROM base AS cook
+RUN cargo install cargo-chef
+WORKDIR /app
+COPY --from=planner /app/recipe.json recipe.json
+RUN SQLX_OFFLINE=true cargo chef cook --release --recipe-path recipe.json
+
+# --- Stage 3: build (compile application code) ---
+FROM cook AS builder
+COPY . .
 RUN SQLX_OFFLINE=true cargo build --release --bin openleadr-vtn
 RUN cp /app/target/release/openleadr-vtn /app/openleadr-vtn
 
+# --- Stage 4: minimal runtime image ---
 FROM alpine:latest AS final
 
 # Install OpenSSL
