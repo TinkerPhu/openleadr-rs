@@ -3,20 +3,36 @@ FROM rust:1.90-alpine AS base
 # Install build dependencies
 RUN apk add --no-cache alpine-sdk openssl-dev openssl-libs-static
 
-FROM base AS builder
-
+# --- Stage 1: planner (extract dependency recipe) ---
+FROM base AS planner
+RUN cargo install cargo-chef
 WORKDIR /app
 COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
 
-# BuildKit cache mounts keep ~/.cargo and target/ across rebuilds.
-# Only changed crates are recompiled when source files change.
-# Don't depend on live sqlx during build — use cached .sqlx
+# --- Stage 2: cook (compile dependencies only) ---
+# Two-layer caching strategy:
+#   * cargo-chef layer cache: hits when Cargo.toml/Cargo.lock unchanged (fast path)
+#   * BuildKit cache mounts: warm cargo cache even on layer-cache miss (source-only change)
+FROM base AS cook
+RUN cargo install cargo-chef
+WORKDIR /app
+COPY --from=planner /app/recipe.json recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    SQLX_OFFLINE=true cargo chef cook --release --recipe-path recipe.json
+
+# --- Stage 3: build (compile application code only) ---
+FROM cook AS builder
+COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
     SQLX_OFFLINE=true cargo build --release --bin openleadr-vtn && \
     cp target/release/openleadr-vtn /openleadr-vtn
 
+# --- Stage 4: minimal runtime image ---
 FROM alpine:latest AS final
 
 # Install OpenSSL
