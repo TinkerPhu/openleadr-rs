@@ -894,7 +894,7 @@ mod tests {
         /// in the JSON column (`Some(TargetMap(...))`). On retrieval,
         /// `reconstruct_ven_name_targets` pushes the VEN_NAME entry into the
         /// existing `TargetMap` via the `Some(ref mut map)` branch.
-        #[sqlx::test(fixtures("vens"))]
+        #[sqlx::test(fixtures("users", "vens"))]
         async fn add_with_mixed_targets(db: PgPool) {
             let repo: PgProgramStorage = db.into();
 
