@@ -969,7 +969,9 @@ mod tests {
         #[sqlx::test(fixtures("users", "programs", "vens", "vens-programs", "events-ven-targets"))]
         async fn ven_in_targets_sees_event_stripped(db: PgPool) {
             let repo: PgEventStorage = db.into();
-            let ven1 = User(Claims::new(vec![AuthRole::VEN(VenId::new("ven-1").unwrap())]));
+            let ven1 = User(Claims::new(vec![AuthRole::VEN(
+                VenId::new("ven-1").unwrap(),
+            )]));
             let event = repo
                 .retrieve(&"event-4".parse().unwrap(), &ven1)
                 .await
@@ -987,23 +989,24 @@ mod tests {
         #[sqlx::test(fixtures("users", "programs", "vens", "vens-programs", "events-ven-targets"))]
         async fn ven_not_in_targets_gets_not_found(db: PgPool) {
             let repo: PgEventStorage = db.into();
-            let ven2 = User(Claims::new(vec![AuthRole::VEN(VenId::new("ven-2").unwrap())]));
-            let result = repo
-                .retrieve(&"event-4".parse().unwrap(), &ven2)
-                .await;
+            let ven2 = User(Claims::new(vec![AuthRole::VEN(
+                VenId::new("ven-2").unwrap(),
+            )]));
+            let result = repo.retrieve(&"event-4".parse().unwrap(), &ven2).await;
             assert!(matches!(result, Err(AppError::NotFound)));
         }
 
         #[sqlx::test(fixtures("users", "programs", "vens", "vens-programs", "events-ven-targets"))]
         async fn ven_list_filters_and_strips(db: PgPool) {
             let repo: PgEventStorage = db.into();
-            let ven1 = User(Claims::new(vec![AuthRole::VEN(VenId::new("ven-1").unwrap())]));
-            let ven2 = User(Claims::new(vec![AuthRole::VEN(VenId::new("ven-2").unwrap())]));
+            let ven1 = User(Claims::new(vec![AuthRole::VEN(
+                VenId::new("ven-1").unwrap(),
+            )]));
+            let ven2 = User(Claims::new(vec![AuthRole::VEN(
+                VenId::new("ven-2").unwrap(),
+            )]));
 
-            let events = repo
-                .retrieve_all(&Default::default(), &ven1)
-                .await
-                .unwrap();
+            let events = repo.retrieve_all(&Default::default(), &ven1).await.unwrap();
             assert_eq!(events.len(), 1);
             let expected = Event {
                 content: EventContent {
@@ -1014,10 +1017,7 @@ mod tests {
             };
             assert_eq!(events[0], expected);
 
-            let events = repo
-                .retrieve_all(&Default::default(), &ven2)
-                .await
-                .unwrap();
+            let events = repo.retrieve_all(&Default::default(), &ven2).await.unwrap();
             assert_eq!(events.len(), 0);
         }
 
