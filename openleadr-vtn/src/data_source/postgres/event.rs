@@ -18,52 +18,6 @@ use sqlx::PgPool;
 use std::str::FromStr;
 use tracing::error;
 
-/// Returns true if the event is currently active (not yet ended).
-/// An event is active if:
-/// - it has no interval_period AND no per-interval timing, OR
-/// - it has no duration (open-ended), OR
-/// - start + duration > now
-///
-/// When the event has no event-level interval_period, falls back to
-/// checking per-interval timing: if every interval has its own
-/// interval_period with a duration and all have ended, the event
-/// is considered inactive.
-fn is_event_active(event: &Event) -> bool {
-    let now = Utc::now();
-    match &event.content.interval_period {
-        Some(ip) => match &ip.duration {
-            None => true,
-            Some(dur) => {
-                let end = ip.start + dur.to_chrono_at_datetime(ip.start);
-                end > now
-            }
-        },
-        None => {
-            // No event-level timing — check per-interval timing
-            let intervals = &event.content.intervals;
-            if intervals.is_empty() {
-                return true;
-            }
-            // If any interval lacks its own timing, we can't determine expiry
-            let all_have_timing = intervals.iter().all(|iv| iv.interval_period.is_some());
-            if !all_have_timing {
-                return true;
-            }
-            // All intervals have timing — check if any is still active
-            intervals.iter().any(|iv| {
-                let ip = iv.interval_period.as_ref().unwrap();
-                match &ip.duration {
-                    None => true, // open-ended interval = still active
-                    Some(dur) => {
-                        let end = ip.start + dur.to_chrono_at_datetime(ip.start);
-                        end > now
-                    }
-                }
-            })
-        }
-    }
-}
-
 #[async_trait]
 impl EventCrud for PgEventStorage {}
 
@@ -301,7 +255,7 @@ impl Crud for PgEventStorage {
         let target: Option<TargetEntry> = filter.targets.clone().into();
         let target_values = target.as_ref().map(|t| t.values.clone());
 
-        let events = sqlx::query_as!(
+        Ok(sqlx::query_as!(
             PostgresEvent,
             r#"
             SELECT e.*
@@ -357,17 +311,11 @@ impl Crud for PgEventStorage {
         .fetch_all(&self.db)
         .await?
         .into_iter()
-        .map(|e| e.try_into().map(|e| strip_ven_name_targets(e, user.is_ven())))
-        .collect::<Result<Vec<Event>, _>>()?;
-
-        // Post-filter by active status if requested
-        let events = match filter.active {
-            Some(true) => events.into_iter().filter(|e| is_event_active(e)).collect(),
-            Some(false) => events.into_iter().filter(|e| !is_event_active(e)).collect(),
-            None => events,
-        };
-
-        Ok(events)
+        .map(|e| {
+            e.try_into()
+                .map(|e| strip_ven_name_targets(e, user.is_ven()))
+        })
+        .collect::<Result<_, _>>()?)
     }
 
     async fn update(
@@ -479,7 +427,6 @@ mod tests {
                 },
                 skip: 0,
                 limit: 50,
-                active: None,
             }
         }
     }
@@ -1007,7 +954,8 @@ mod tests {
             )]));
 
             let events = repo.retrieve_all(&Default::default(), &ven1).await.unwrap();
-            assert_eq!(events.len(), 1);
+            // ven-1 sees event-4 (VEN_NAME targeted, stripped) + event-5 (null targets)
+            assert_eq!(events.len(), 2);
             let expected = Event {
                 content: EventContent {
                     targets: None,
@@ -1015,10 +963,11 @@ mod tests {
                 },
                 ..event_4()
             };
-            assert_eq!(events[0], expected);
+            assert!(events.iter().any(|e| e == &expected));
 
             let events = repo.retrieve_all(&Default::default(), &ven2).await.unwrap();
-            assert_eq!(events.len(), 0);
+            // ven-2 is excluded from event-4 (VEN_NAME=ven-1-name); event-5 is visible
+            assert_eq!(events.len(), 1);
         }
 
         #[sqlx::test(fixtures("programs", "events-ven-targets"))]
@@ -1032,6 +981,19 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(event, event_4());
+        }
+
+        #[sqlx::test(fixtures("users", "programs", "vens", "vens-programs", "events-ven-targets"))]
+        async fn ven_sees_event_with_null_targets(db: PgPool) {
+            let repo: PgEventStorage = db.into();
+            let ven1 = User(Claims::new(vec![AuthRole::VEN(
+                VenId::new("ven-1").unwrap(),
+            )]));
+            let event = repo
+                .retrieve(&"event-5".parse().unwrap(), &ven1)
+                .await
+                .unwrap();
+            assert_eq!(event.content.targets, None);
         }
     }
 }
