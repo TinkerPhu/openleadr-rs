@@ -301,7 +301,7 @@ impl Crud for PgEventStorage {
         let target: Option<TargetEntry> = filter.targets.clone().into();
         let target_values = target.as_ref().map(|t| t.values.clone());
 
-        Ok(sqlx::query_as!(
+        let events = sqlx::query_as!(
             PostgresEvent,
             r#"
             SELECT e.*
