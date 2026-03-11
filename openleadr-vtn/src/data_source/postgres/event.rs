@@ -18,6 +18,52 @@ use sqlx::PgPool;
 use std::str::FromStr;
 use tracing::error;
 
+/// Returns true if the event is currently active (not yet ended).
+/// An event is active if:
+/// - it has no interval_period AND no per-interval timing, OR
+/// - it has no duration (open-ended), OR
+/// - start + duration > now
+///
+/// When the event has no event-level interval_period, falls back to
+/// checking per-interval timing: if every interval has its own
+/// interval_period with a duration and all have ended, the event
+/// is considered inactive.
+fn is_event_active(event: &Event) -> bool {
+    let now = Utc::now();
+    match &event.content.interval_period {
+        Some(ip) => match &ip.duration {
+            None => true,
+            Some(dur) => {
+                let end = ip.start + dur.to_chrono_at_datetime(ip.start);
+                end > now
+            }
+        },
+        None => {
+            // No event-level timing — check per-interval timing
+            let intervals = &event.content.intervals;
+            if intervals.is_empty() {
+                return true;
+            }
+            // If any interval lacks its own timing, we can't determine expiry
+            let all_have_timing = intervals.iter().all(|iv| iv.interval_period.is_some());
+            if !all_have_timing {
+                return true;
+            }
+            // All intervals have timing — check if any is still active
+            intervals.iter().any(|iv| {
+                let ip = iv.interval_period.as_ref().unwrap();
+                match &ip.duration {
+                    None => true, // open-ended interval = still active
+                    Some(dur) => {
+                        let end = ip.start + dur.to_chrono_at_datetime(ip.start);
+                        end > now
+                    }
+                }
+            })
+        }
+    }
+}
+
 #[async_trait]
 impl EventCrud for PgEventStorage {}
 
@@ -315,7 +361,15 @@ impl Crud for PgEventStorage {
             e.try_into()
                 .map(|e| strip_ven_name_targets(e, user.is_ven()))
         })
-        .collect::<Result<_, _>>()?)
+        .collect::<Result<Vec<Event>, _>>()?;
+
+        let events = match filter.active {
+            Some(true) => events.into_iter().filter(|e| is_event_active(e)).collect(),
+            Some(false) => events.into_iter().filter(|e| !is_event_active(e)).collect(),
+            None => events,
+        };
+
+        Ok(events)
     }
 
     async fn update(
