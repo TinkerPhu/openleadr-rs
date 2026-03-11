@@ -481,6 +481,7 @@ mod tests {
                 },
                 skip: 0,
                 limit: 50,
+                active: None,
             }
         }
     }
