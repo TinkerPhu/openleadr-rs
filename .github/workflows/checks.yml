@@ -4,12 +4,13 @@ permissions:
   contents: read
 
 on:
-  pull_request:
-    branches-ignore:
-      - 'release/**'
-  merge_group:
-    branches:
-      - main
+  workflow_dispatch:  # run manually via GitHub UI "Run workflow" button
+  #pull_request:
+    #branches-ignore:
+    #  - 'release/**'
+  #merge_group:
+    #branches:
+    #  - main
 
 jobs:
   build:
