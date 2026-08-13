@@ -106,6 +106,39 @@ impl EventContent {
         self.intervals = intervals;
         self
     }
+
+    /// The instant this event stops being active, or `None` if it is open-ended
+    /// (no end can be determined — treat as always active).
+    ///
+    /// Mirrors the fallback rules an event's active-status check uses: an
+    /// event-level `intervalPeriod` wins if present; otherwise, if every
+    /// interval carries its own `intervalPeriod` with a duration, the event
+    /// ends when the last one does. Any open-ended interval (no duration) or
+    /// missing per-interval timing makes the whole event open-ended.
+    pub fn ends_at(&self) -> Option<DateTime<Utc>> {
+        match &self.interval_period {
+            Some(ip) => ip
+                .duration
+                .as_ref()
+                .map(|dur| ip.start + dur.to_chrono_at_datetime(ip.start)),
+            None => {
+                if self.intervals.is_empty() {
+                    return None;
+                }
+                let mut latest_end: Option<DateTime<Utc>> = None;
+                for iv in &self.intervals {
+                    let ip = iv.interval_period.as_ref()?;
+                    let dur = ip.duration.as_ref()?;
+                    let end = ip.start + dur.to_chrono_at_datetime(ip.start);
+                    latest_end = Some(match latest_end {
+                        Some(current) => current.max(end),
+                        None => end,
+                    });
+                }
+                latest_end
+            }
+        }
+    }
 }
 
 /// URL safe VTN assigned object ID
@@ -566,5 +599,74 @@ mod tests {
             .unwrap()
             .validate();
         assert_eq!(actual, expected);
+    }
+
+    fn interval_period(start: DateTime<Utc>, duration: Option<&str>) -> IntervalPeriod {
+        IntervalPeriod {
+            start,
+            duration: duration.map(|d| d.parse().unwrap()),
+            randomize_start: None,
+        }
+    }
+
+    #[test]
+    fn ends_at_event_level_with_duration() {
+        let start: DateTime<Utc> = "2023-06-15T09:00:00Z".parse().unwrap();
+        let content = EventContent::new("p".parse().unwrap(), vec![])
+            .with_interval_period(interval_period(start, Some("PT1H")));
+        assert_eq!(
+            content.ends_at(),
+            Some("2023-06-15T10:00:00Z".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn ends_at_event_level_open_ended_is_none() {
+        let start: DateTime<Utc> = "2023-06-15T09:00:00Z".parse().unwrap();
+        let content = EventContent::new("p".parse().unwrap(), vec![])
+            .with_interval_period(interval_period(start, None));
+        assert_eq!(content.ends_at(), None);
+    }
+
+    #[test]
+    fn ends_at_no_event_level_timing_no_intervals_is_none() {
+        let content = EventContent::new("p".parse().unwrap(), vec![]);
+        assert_eq!(content.ends_at(), None);
+    }
+
+    #[test]
+    fn ends_at_no_event_level_timing_missing_per_interval_timing_is_none() {
+        let start: DateTime<Utc> = "2023-06-15T09:00:00Z".parse().unwrap();
+        let mut iv1 = EventInterval::new(0, vec![]);
+        iv1.interval_period = Some(interval_period(start, Some("PT1H")));
+        let iv2 = EventInterval::new(1, vec![]); // no interval_period at all
+        let content = EventContent::new("p".parse().unwrap(), vec![iv1, iv2]);
+        assert_eq!(content.ends_at(), None);
+    }
+
+    #[test]
+    fn ends_at_no_event_level_timing_any_open_ended_interval_is_none() {
+        let start: DateTime<Utc> = "2023-06-15T09:00:00Z".parse().unwrap();
+        let mut iv1 = EventInterval::new(0, vec![]);
+        iv1.interval_period = Some(interval_period(start, Some("PT1H")));
+        let mut iv2 = EventInterval::new(1, vec![]);
+        iv2.interval_period = Some(interval_period(start, None)); // open-ended
+        let content = EventContent::new("p".parse().unwrap(), vec![iv1, iv2]);
+        assert_eq!(content.ends_at(), None);
+    }
+
+    #[test]
+    fn ends_at_no_event_level_timing_uses_latest_interval_end() {
+        let start: DateTime<Utc> = "2023-06-15T09:00:00Z".parse().unwrap();
+        let mut iv1 = EventInterval::new(0, vec![]);
+        iv1.interval_period = Some(interval_period(start, Some("PT1H")));
+        let later_start: DateTime<Utc> = "2023-06-15T12:00:00Z".parse().unwrap();
+        let mut iv2 = EventInterval::new(1, vec![]);
+        iv2.interval_period = Some(interval_period(later_start, Some("PT30M")));
+        let content = EventContent::new("p".parse().unwrap(), vec![iv1, iv2]);
+        assert_eq!(
+            content.ends_at(),
+            Some("2023-06-15T12:30:00Z".parse().unwrap())
+        );
     }
 }

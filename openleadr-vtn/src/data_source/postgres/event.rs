@@ -18,52 +18,6 @@ use sqlx::PgPool;
 use std::str::FromStr;
 use tracing::error;
 
-/// Returns true if the event is currently active (not yet ended).
-/// An event is active if:
-/// - it has no interval_period AND no per-interval timing, OR
-/// - it has no duration (open-ended), OR
-/// - start + duration > now
-///
-/// When the event has no event-level interval_period, falls back to
-/// checking per-interval timing: if every interval has its own
-/// interval_period with a duration and all have ended, the event
-/// is considered inactive.
-fn is_event_active(event: &Event) -> bool {
-    let now = Utc::now();
-    match &event.content.interval_period {
-        Some(ip) => match &ip.duration {
-            None => true,
-            Some(dur) => {
-                let end = ip.start + dur.to_chrono_at_datetime(ip.start);
-                end > now
-            }
-        },
-        None => {
-            // No event-level timing — check per-interval timing
-            let intervals = &event.content.intervals;
-            if intervals.is_empty() {
-                return true;
-            }
-            // If any interval lacks its own timing, we can't determine expiry
-            let all_have_timing = intervals.iter().all(|iv| iv.interval_period.is_some());
-            if !all_have_timing {
-                return true;
-            }
-            // All intervals have timing — check if any is still active
-            intervals.iter().any(|iv| {
-                let ip = iv.interval_period.as_ref().unwrap();
-                match &ip.duration {
-                    None => true, // open-ended interval = still active
-                    Some(dur) => {
-                        let end = ip.start + dur.to_chrono_at_datetime(ip.start);
-                        end > now
-                    }
-                }
-            })
-        }
-    }
-}
-
 #[async_trait]
 impl EventCrud for PgEventStorage {}
 
@@ -216,12 +170,14 @@ impl Crud for PgEventStorage {
     ) -> Result<Self::Type, Self::Error> {
         check_write_permission(new.program_id.as_str(), user, &self.db).await?;
 
+        let ends_at = new.ends_at();
+
         Ok(sqlx::query_as!(
             PostgresEvent,
             r#"
-            INSERT INTO event (id, created_date_time, modification_date_time, program_id, event_name, priority, targets, report_descriptors, payload_descriptors, interval_period, intervals)
-            VALUES (gen_random_uuid(), now(), now(), $1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING *
+            INSERT INTO event (id, created_date_time, modification_date_time, program_id, event_name, priority, targets, report_descriptors, payload_descriptors, interval_period, intervals, ends_at)
+            VALUES (gen_random_uuid(), now(), now(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING id, created_date_time, modification_date_time, program_id, event_name, priority, targets, report_descriptors, payload_descriptors, interval_period, intervals
             "#,
             new.program_id.as_str(),
             new.event_name,
@@ -231,6 +187,7 @@ impl Crud for PgEventStorage {
             to_json_value(new.payload_descriptors)?,
             to_json_value(new.interval_period)?,
             serde_json::to_value(&new.intervals).map_err(AppError::SerdeJsonBadRequest)?,
+            ends_at,
         )
             .fetch_one(&self.db)
             .await?
@@ -251,7 +208,7 @@ impl Crud for PgEventStorage {
         Ok(sqlx::query_as!(
             PostgresEvent,
             r#"
-            SELECT e.*
+            SELECT e.id, e.created_date_time, e.modification_date_time, e.program_id, e.event_name, e.priority, e.targets, e.report_descriptors, e.payload_descriptors, e.interval_period, e.intervals
             FROM event e
               JOIN program p ON e.program_id = p.id
               LEFT JOIN ven_program vp ON p.id = vp.program_id
@@ -304,7 +261,7 @@ impl Crud for PgEventStorage {
         let events = sqlx::query_as!(
             PostgresEvent,
             r#"
-            SELECT e.*
+            SELECT e.id, e.created_date_time, e.modification_date_time, e.program_id, e.event_name, e.priority, e.targets, e.report_descriptors, e.payload_descriptors, e.interval_period, e.intervals
             FROM event e
               JOIN program p on p.id = e.program_id
               LEFT JOIN ven_program vp ON p.id = vp.program_id
@@ -340,6 +297,11 @@ impl Crud for PgEventStorage {
                         AND t->'values' ? v.ven_name
                   )
               )
+              AND (
+                  $10::bool IS NULL
+                  OR ($10 AND (e.ends_at IS NULL OR e.ends_at > now()))
+                  OR (NOT $10 AND e.ends_at IS NOT NULL AND e.ends_at <= now())
+              )
             GROUP BY e.id, e.priority, e.created_date_time
             ORDER BY priority ASC , created_date_time DESC
             OFFSET $8 LIMIT $9
@@ -352,7 +314,8 @@ impl Crud for PgEventStorage {
             user.is_business(),
             business_ids.as_deref(),
             filter.skip,
-            filter.limit
+            filter.limit,
+            filter.active,
         )
         .fetch_all(&self.db)
         .await?
@@ -362,12 +325,6 @@ impl Crud for PgEventStorage {
                 .map(|e| strip_ven_name_targets(e, user.is_ven()))
         })
         .collect::<Result<Vec<Event>, _>>()?;
-
-        let events = match filter.active {
-            Some(true) => events.into_iter().filter(|e| is_event_active(e)).collect(),
-            Some(false) => events.into_iter().filter(|e| !is_event_active(e)).collect(),
-            None => events,
-        };
 
         Ok(events)
     }
@@ -392,6 +349,8 @@ impl Crud for PgEventStorage {
             check_write_permission(&previous_program_id, user, &self.db).await?;
         }
 
+        let ends_at = new.ends_at();
+
         Ok(sqlx::query_as!(
             PostgresEvent,
             r#"
@@ -404,9 +363,10 @@ impl Crud for PgEventStorage {
                 report_descriptors = $6,
                 payload_descriptors = $7,
                 interval_period = $8,
-                intervals = $9
+                intervals = $9,
+                ends_at = $10
             WHERE id = $1
-            RETURNING *
+            RETURNING id, created_date_time, modification_date_time, program_id, event_name, priority, targets, report_descriptors, payload_descriptors, interval_period, intervals
             "#,
             id.as_str(),
             new.program_id.as_str(),
@@ -417,6 +377,7 @@ impl Crud for PgEventStorage {
             to_json_value(new.payload_descriptors)?,
             to_json_value(new.interval_period)?,
             serde_json::to_value(&new.intervals).map_err(AppError::SerdeJsonBadRequest)?,
+            ends_at,
         )
         .fetch_one(&self.db)
         .await?
@@ -440,7 +401,8 @@ impl Crud for PgEventStorage {
         Ok(sqlx::query_as!(
             PostgresEvent,
             r#"
-            DELETE FROM event WHERE id = $1 RETURNING *
+            DELETE FROM event WHERE id = $1
+            RETURNING id, created_date_time, modification_date_time, program_id, event_name, priority, targets, report_descriptors, payload_descriptors, interval_period, intervals
             "#,
             id.as_str()
         )
