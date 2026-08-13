@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            INSERT INTO event (id, created_date_time, modification_date_time, program_id, event_name, priority, targets, report_descriptors, payload_descriptors, interval_period, intervals)\n            VALUES (gen_random_uuid(), now(), now(), $1, $2, $3, $4, $5, $6, $7, $8)\n            RETURNING *\n            ",
+  "query": "\n            UPDATE event\n            SET modification_date_time = now(),\n                program_id = $2,\n                event_name = $3,\n                priority = $4,\n                targets = $5,\n                report_descriptors = $6,\n                payload_descriptors = $7,\n                interval_period = $8,\n                intervals = $9,\n                ends_at = $10\n            WHERE id = $1\n            RETURNING id, created_date_time, modification_date_time, program_id, event_name, priority, targets, report_descriptors, payload_descriptors, interval_period, intervals\n            ",
   "describe": {
     "columns": [
       {
@@ -35,27 +35,27 @@
       },
       {
         "ordinal": 6,
-        "name": "report_descriptors",
+        "name": "targets",
         "type_info": "Jsonb"
       },
       {
         "ordinal": 7,
-        "name": "payload_descriptors",
+        "name": "report_descriptors",
         "type_info": "Jsonb"
       },
       {
         "ordinal": 8,
-        "name": "interval_period",
+        "name": "payload_descriptors",
         "type_info": "Jsonb"
       },
       {
         "ordinal": 9,
-        "name": "intervals",
+        "name": "interval_period",
         "type_info": "Jsonb"
       },
       {
         "ordinal": 10,
-        "name": "targets",
+        "name": "intervals",
         "type_info": "Jsonb"
       }
     ],
@@ -63,12 +63,14 @@
       "Left": [
         "Text",
         "Text",
+        "Text",
         "Int8",
         "Jsonb",
         "Jsonb",
         "Jsonb",
         "Jsonb",
-        "Jsonb"
+        "Jsonb",
+        "Timestamptz"
       ]
     },
     "nullable": [
@@ -81,9 +83,9 @@
       true,
       true,
       true,
-      false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "61a3a672b60c14241fe120eaadd3ad42176388569a4f942bcd0b305fdc6dd332"
+  "hash": "45e24b07c26b89609a0d380b25f8a299eff88ab386bae2aab21f5bf2a767e5e6"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE event\n            SET modification_date_time = now(),\n                program_id = $2,\n                event_name = $3,\n                priority = $4,\n                targets = $5,\n                report_descriptors = $6,\n                payload_descriptors = $7,\n                interval_period = $8,\n                intervals = $9\n            WHERE id = $1\n            RETURNING *\n            ",
+  "query": "\n            DELETE FROM event WHERE id = $1\n            RETURNING id, created_date_time, modification_date_time, program_id, event_name, priority, targets, report_descriptors, payload_descriptors, interval_period, intervals\n            ",
   "describe": {
     "columns": [
       {
@@ -35,41 +35,33 @@
       },
       {
         "ordinal": 6,
-        "name": "report_descriptors",
+        "name": "targets",
         "type_info": "Jsonb"
       },
       {
         "ordinal": 7,
-        "name": "payload_descriptors",
+        "name": "report_descriptors",
         "type_info": "Jsonb"
       },
       {
         "ordinal": 8,
-        "name": "interval_period",
+        "name": "payload_descriptors",
         "type_info": "Jsonb"
       },
       {
         "ordinal": 9,
-        "name": "intervals",
+        "name": "interval_period",
         "type_info": "Jsonb"
       },
       {
         "ordinal": 10,
-        "name": "targets",
+        "name": "intervals",
         "type_info": "Jsonb"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
-        "Text",
-        "Text",
-        "Int8",
-        "Jsonb",
-        "Jsonb",
-        "Jsonb",
-        "Jsonb",
-        "Jsonb"
+        "Text"
       ]
     },
     "nullable": [
@@ -82,9 +74,9 @@
       true,
       true,
       true,
-      false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "faf3290725899dc80b16c2233995a2b3002ebb0989f4d5284880226579d983b3"
+  "hash": "51e9e3c61911a99f3cbd2d63d82a8b66d9651fa1df1f30a01157523fc432be9e"
 }
