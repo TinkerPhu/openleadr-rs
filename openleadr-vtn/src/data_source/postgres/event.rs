@@ -739,6 +739,64 @@ mod tests {
                 .unwrap();
             assert_eq!(events.len(), 0);
         }
+
+        #[sqlx::test(fixtures("programs", "events"))]
+        async fn active_filter_true_get_all(db: PgPool) {
+            let repo: PgEventStorage = db.into();
+
+            let mut events = repo
+                .retrieve_all(
+                    &QueryParams {
+                        active: Some(true),
+                        ..Default::default()
+                    },
+                    &User(Claims::any_business_user()),
+                )
+                .await
+                .unwrap();
+            events.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+            // event-1 ended in 2023; event-2/event-3 have no determinable end
+            // (always active) — active=true excludes only event-1.
+            assert_eq!(events, vec![event_2(), event_3()]);
+        }
+
+        #[sqlx::test(fixtures("programs", "events"))]
+        async fn active_filter_false_get_all(db: PgPool) {
+            let repo: PgEventStorage = db.into();
+
+            let events = repo
+                .retrieve_all(
+                    &QueryParams {
+                        active: Some(false),
+                        ..Default::default()
+                    },
+                    &User(Claims::any_business_user()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(events, vec![event_1()]);
+        }
+
+        #[sqlx::test(fixtures("programs", "events"))]
+        async fn active_filter_combined_with_pagination(db: PgPool) {
+            // Regression for the original bug: OFFSET/LIMIT used to run in SQL
+            // before the (then Rust-side) active filter, so a page could come
+            // back short even though more matching rows existed.
+            let repo: PgEventStorage = db.into();
+
+            let events = repo
+                .retrieve_all(
+                    &QueryParams {
+                        active: Some(true),
+                        limit: 1,
+                        ..Default::default()
+                    },
+                    &User(Claims::any_business_user()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(events.len(), 1);
+        }
     }
 
     mod get {
