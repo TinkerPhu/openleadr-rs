@@ -761,13 +761,15 @@ mod tests {
 
     #[test]
     fn ends_at_event_level_with_duration() {
-        let content = event().with_interval_period(interval_period(at("2023-06-15T09:00:00Z"), Some("PT1H")));
+        let content =
+            event().with_interval_period(interval_period(at("2023-06-15T09:00:00Z"), Some("PT1H")));
         assert_eq!(content.ends_at(), Some(at("2023-06-15T10:00:00Z")));
     }
 
     #[test]
     fn ends_at_event_level_open_ended_is_none() {
-        let content = event().with_interval_period(interval_period(at("2023-06-15T09:00:00Z"), None));
+        let content =
+            event().with_interval_period(interval_period(at("2023-06-15T09:00:00Z"), None));
         assert_eq!(content.ends_at(), None);
     }
 
@@ -847,7 +849,10 @@ mod tests {
         // the inheritance fallback this would report an undeterminable end and never expire.
         let content = event()
             .with_interval_period(interval_period(at("2023-06-15T09:00:00Z"), Some("PT1H")))
-            .with_intervals(vec![EventInterval::new(0, vec![]), EventInterval::new(1, vec![])]);
+            .with_intervals(vec![
+                EventInterval::new(0, vec![]),
+                EventInterval::new(1, vec![]),
+            ]);
         assert_eq!(content.ends_at(), Some(at("2023-06-15T10:00:00Z")));
     }
 
