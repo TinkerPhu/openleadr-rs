@@ -13,7 +13,7 @@ keywords.workspace = true
 categories = ["web-programming"]
 
 [dependencies]
-openleadr-wire.workspace = true
+openleadr-wire = { workspace = true, features = ["sqlx"] }
 
 serde.workspace = true
 serde_json.workspace = true

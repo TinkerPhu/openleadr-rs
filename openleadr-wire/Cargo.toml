@@ -23,7 +23,15 @@ url.workspace = true
 validator.workspace = true
 iso_currency.workspace = true
 derive_more.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, optional = true }
+
+[features]
+default = []
+# Derive `sqlx::Type` on the identifier newtypes. Only the VTN (which talks to a
+# database) needs this; clients such as the lab VEN depend on this crate purely
+# to encode and decode OpenADR messages and must not pull in a Postgres driver
+# and TLS stack to do it.
+sqlx = ["dep:sqlx"]
 
 [dev-dependencies]
 serde_json.workspace = true

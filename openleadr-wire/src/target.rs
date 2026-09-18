@@ -7,9 +7,9 @@ use std::fmt::Display;
 
 /// User generated target string.
 #[derive(
-    Clone, Debug, PartialEq, Serialize, Deserialize, Hash, Eq, FromStr, sqlx::Type, PartialOrd, Ord,
+    Clone, Debug, PartialEq, Serialize, Deserialize, Hash, Eq, FromStr, PartialOrd, Ord,
 )]
-#[sqlx(transparent)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type), sqlx(transparent))]
 pub struct Target(pub(crate) Identifier);
 
 impl Display for Target {
