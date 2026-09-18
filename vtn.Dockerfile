@@ -1,19 +1,48 @@
-FROM rust:1.94-alpine AS builder
+FROM rust:1.94-alpine AS base
 
-ADD . /app
+# Build dependencies. openssl3-dev + libgcc (rather than openssl-libs-static) because
+# the release build links OpenSSL dynamically -- see RUSTFLAGS below.
+RUN apk add --no-cache cmake g++ make openssl3-dev libgcc
+
+# --- Stage 1: planner (extract dependency recipe) ---
+FROM base AS planner
+RUN cargo install cargo-chef
 WORKDIR /app
 COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
 
-RUN apk add cmake g++ make openssl3-dev libgcc
+# --- Stage 2: cook (compile dependencies only) ---
+# Two-layer caching strategy:
+#   * cargo-chef layer cache: hits when Cargo.toml/Cargo.lock unchanged (fast path)
+#   * BuildKit cache mounts: warm cargo cache even on layer-cache miss (source-only change)
+FROM base AS cook
+RUN cargo install cargo-chef
+WORKDIR /app
+COPY --from=planner /app/recipe.json recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    SQLX_OFFLINE=true RUSTFLAGS="-Ctarget-feature=-crt-static" \
+    cargo chef cook --release --recipe-path recipe.json
 
-# Don't depend on live sqlx during build use cached .sqlx
-RUN SQLX_OFFLINE=true RUSTFLAGS="-Ctarget-feature=-crt-static" \
-    cargo build --release --bin openleadr-vtn --features internal-oauth
-RUN cp /app/target/release/openleadr-vtn /app/openleadr-vtn
+# --- Stage 3: build (compile application code only) ---
+# `internal-oauth` is NOT in the crate's default features: it gates POST /auth/token
+# and the whole /users tree. The lab authenticates every VEN, the BFF, the seed script
+# and all BDD steps through that endpoint, so the flag is mandatory here -- without it
+# the image builds fine and then 404s on every token request.
+FROM cook AS builder
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    SQLX_OFFLINE=true RUSTFLAGS="-Ctarget-feature=-crt-static" \
+    cargo build --release --bin openleadr-vtn --features internal-oauth && \
+    cp target/release/openleadr-vtn /openleadr-vtn
 
+# --- Stage 4: minimal runtime image ---
 FROM alpine:latest AS final
 
-RUN apk add libssl3 libgcc
+RUN apk add --no-cache libssl3 libgcc
 
 # create a non root user to run the binary
 ARG user=nonroot
@@ -27,7 +56,7 @@ EXPOSE 3000
 
 WORKDIR /dist
 
-COPY --from=builder --chown=root:root --chmod=755 /app/openleadr-vtn/openleadr-vtn /dist/openleadr-vtn
+COPY --from=builder --chown=root:root --chmod=755 /openleadr-vtn /dist/openleadr-vtn
 
 USER $user
 
