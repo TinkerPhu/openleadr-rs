@@ -116,6 +116,74 @@ impl EventRequest {
         self.intervals = Some(intervals);
         self
     }
+
+    pub fn with_duration(mut self, duration: Duration) -> Self {
+        self.duration = Some(duration);
+        self
+    }
+
+    /// The instant this event stops being active, or `None` if no end can be determined
+    /// from what the event declares -- treat `None` as always active.
+    ///
+    /// An event may declare several ends: the event-level `intervalPeriod`, the top-level
+    /// `duration`, and the per-interval periods. The event ends at the **latest** of them.
+    /// An end that cannot be determined counts as unbounded, and unbounded is the longest
+    /// of all, so any undeterminable source yields `None`.
+    ///
+    /// Longest wins because this answers "is the event still active", which governs
+    /// visibility and retention rather than control -- dispatch is decided per interval.
+    /// An end that is too late leaves an event visible with no applicable interval at
+    /// `now`, which is inert. An end that is too early drops an event out of the active
+    /// set while its intervals are still running, losing a live obligation.
+    pub fn ends_at(&self) -> Option<DateTime<Utc>> {
+        let anchor = self.start_anchor();
+        let mut latest: Option<DateTime<Utc>> = None;
+
+        if let Some(ip) = &self.interval_period {
+            // an event-level period without a duration is open-ended
+            let duration = ip.duration.as_ref()?;
+            latest = Some(ip.start + duration.to_chrono_at_datetime(ip.start));
+        }
+
+        if let Some(duration) = &self.duration {
+            // a top-level duration with nothing to anchor it to is undeterminable
+            let start = anchor?;
+            let end = start + duration.to_chrono_at_datetime(start);
+            latest = Some(latest.map_or(end, |current| current.max(end)));
+        }
+
+        if let Some(intervals) = &self.intervals {
+            for interval in intervals {
+                // The event-level period "defines default start and durations of
+                // intervals", so an interval without its own period inherits it. This
+                // fallback is load-bearing: without it, the very common shape of an
+                // event-level period plus payload-only intervals would report an
+                // undeterminable end and so never expire.
+                let ip = interval
+                    .interval_period
+                    .as_ref()
+                    .or(self.interval_period.as_ref())?;
+                let duration = ip.duration.as_ref()?;
+                let end = ip.start + duration.to_chrono_at_datetime(ip.start);
+                latest = Some(latest.map_or(end, |current| current.max(end)));
+            }
+        }
+
+        latest
+    }
+
+    /// The instant the event starts, used to anchor a top-level `duration`: the
+    /// event-level period if there is one, otherwise the earliest interval start.
+    fn start_anchor(&self) -> Option<DateTime<Utc>> {
+        if let Some(ip) = &self.interval_period {
+            return Some(ip.start);
+        }
+        self.intervals
+            .as_ref()?
+            .iter()
+            .filter_map(|interval| interval.interval_period.as_ref().map(|ip| ip.start))
+            .min()
+    }
 }
 
 /// URL safe VTN assigned object ID
@@ -668,5 +736,147 @@ mod tests {
         let map: EventValuesMap =
             serde_json::from_str(r#"{"type": "PRICE", "values": [true]}"#).unwrap();
         assert!(map.validate().is_err());
+    }
+
+    // ---- ends_at: longest of every end the event declares -------------------
+    //
+    // The first six cases are the original 3.0 suite, ported unchanged: each must
+    // still hold under longest-wins, with `None` as the point at infinity.
+
+    fn interval_period(start: DateTime<Utc>, duration: Option<&str>) -> IntervalPeriod {
+        IntervalPeriod {
+            start,
+            duration: duration.map(|d| d.parse().unwrap()),
+            randomize_start: None,
+        }
+    }
+
+    fn at(ts: &str) -> DateTime<Utc> {
+        ts.parse().unwrap()
+    }
+
+    fn event() -> EventRequest {
+        EventRequest::new("p".parse().unwrap())
+    }
+
+    #[test]
+    fn ends_at_event_level_with_duration() {
+        let content = event().with_interval_period(interval_period(at("2023-06-15T09:00:00Z"), Some("PT1H")));
+        assert_eq!(content.ends_at(), Some(at("2023-06-15T10:00:00Z")));
+    }
+
+    #[test]
+    fn ends_at_event_level_open_ended_is_none() {
+        let content = event().with_interval_period(interval_period(at("2023-06-15T09:00:00Z"), None));
+        assert_eq!(content.ends_at(), None);
+    }
+
+    #[test]
+    fn ends_at_no_event_level_timing_no_intervals_is_none() {
+        assert_eq!(event().ends_at(), None);
+    }
+
+    #[test]
+    fn ends_at_no_event_level_timing_missing_per_interval_timing_is_none() {
+        let mut iv1 = EventInterval::new(0, vec![]);
+        iv1.interval_period = Some(interval_period(at("2023-06-15T09:00:00Z"), Some("PT1H")));
+        let iv2 = EventInterval::new(1, vec![]); // no interval_period at all
+        assert_eq!(event().with_intervals(vec![iv1, iv2]).ends_at(), None);
+    }
+
+    #[test]
+    fn ends_at_no_event_level_timing_any_open_ended_interval_is_none() {
+        let start = at("2023-06-15T09:00:00Z");
+        let mut iv1 = EventInterval::new(0, vec![]);
+        iv1.interval_period = Some(interval_period(start, Some("PT1H")));
+        let mut iv2 = EventInterval::new(1, vec![]);
+        iv2.interval_period = Some(interval_period(start, None)); // open-ended
+        assert_eq!(event().with_intervals(vec![iv1, iv2]).ends_at(), None);
+    }
+
+    #[test]
+    fn ends_at_no_event_level_timing_uses_latest_interval_end() {
+        let mut iv1 = EventInterval::new(0, vec![]);
+        iv1.interval_period = Some(interval_period(at("2023-06-15T09:00:00Z"), Some("PT1H")));
+        let mut iv2 = EventInterval::new(1, vec![]);
+        iv2.interval_period = Some(interval_period(at("2023-06-15T12:00:00Z"), Some("PT30M")));
+        assert_eq!(
+            event().with_intervals(vec![iv1, iv2]).ends_at(),
+            Some(at("2023-06-15T12:30:00Z"))
+        );
+    }
+
+    // ---- cases 3.0 could not express ----------------------------------------
+
+    #[test]
+    fn ends_at_top_level_duration_anchored_on_event_period() {
+        let content = event()
+            .with_interval_period(interval_period(at("2023-06-15T09:00:00Z"), Some("PT1H")))
+            .with_duration("PT3H".parse().unwrap());
+        // the top-level duration outlasts the event-level period
+        assert_eq!(content.ends_at(), Some(at("2023-06-15T12:00:00Z")));
+    }
+
+    #[test]
+    fn ends_at_intervals_outlast_the_top_level_duration() {
+        let mut iv = EventInterval::new(0, vec![]);
+        iv.interval_period = Some(interval_period(at("2023-06-15T09:00:00Z"), Some("PT3H")));
+        let content = event()
+            .with_interval_period(interval_period(at("2023-06-15T09:00:00Z"), Some("PT1H")))
+            .with_duration("PT1H".parse().unwrap())
+            .with_intervals(vec![iv]);
+        // an over-short end would drop the event while this interval is still running
+        assert_eq!(content.ends_at(), Some(at("2023-06-15T12:00:00Z")));
+    }
+
+    #[test]
+    fn ends_at_event_level_period_no_longer_short_circuits() {
+        // Intentional change from 3.0, where the event-level period won outright and
+        // the intervals were never consulted.
+        let mut iv = EventInterval::new(0, vec![]);
+        iv.interval_period = Some(interval_period(at("2023-06-15T11:00:00Z"), Some("PT2H")));
+        let content = event()
+            .with_interval_period(interval_period(at("2023-06-15T09:00:00Z"), Some("PT1H")))
+            .with_intervals(vec![iv]);
+        assert_eq!(content.ends_at(), Some(at("2023-06-15T13:00:00Z")));
+    }
+
+    #[test]
+    fn ends_at_intervals_inherit_the_event_level_period() {
+        // The common shape: an event-level period plus payload-only intervals. Without
+        // the inheritance fallback this would report an undeterminable end and never expire.
+        let content = event()
+            .with_interval_period(interval_period(at("2023-06-15T09:00:00Z"), Some("PT1H")))
+            .with_intervals(vec![EventInterval::new(0, vec![]), EventInterval::new(1, vec![])]);
+        assert_eq!(content.ends_at(), Some(at("2023-06-15T10:00:00Z")));
+    }
+
+    #[test]
+    fn ends_at_one_unbounded_source_makes_the_event_unbounded() {
+        let mut iv = EventInterval::new(0, vec![]);
+        iv.interval_period = Some(interval_period(at("2023-06-15T09:00:00Z"), None));
+        let content = event()
+            .with_duration("PT1H".parse().unwrap())
+            .with_intervals(vec![iv]);
+        assert_eq!(content.ends_at(), None);
+    }
+
+    #[test]
+    fn ends_at_top_level_duration_without_an_anchor_is_none() {
+        let content = event().with_duration("PT1H".parse().unwrap());
+        assert_eq!(content.ends_at(), None);
+    }
+
+    #[test]
+    fn ends_at_top_level_duration_anchors_on_earliest_interval_start() {
+        let mut iv1 = EventInterval::new(0, vec![]);
+        iv1.interval_period = Some(interval_period(at("2023-06-15T12:00:00Z"), Some("PT30M")));
+        let mut iv2 = EventInterval::new(1, vec![]);
+        iv2.interval_period = Some(interval_period(at("2023-06-15T09:00:00Z"), Some("PT30M")));
+        let content = event()
+            .with_duration("PT5H".parse().unwrap())
+            .with_intervals(vec![iv1, iv2]);
+        // anchored on 09:00, so 14:00 -- later than either interval end
+        assert_eq!(content.ends_at(), Some(at("2023-06-15T14:00:00Z")));
     }
 }

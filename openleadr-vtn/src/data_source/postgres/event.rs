@@ -128,11 +128,13 @@ impl Crud for PgEventStorage {
         new: Self::NewType,
         _client_id: &Self::PermissionFilter,
     ) -> Result<Self::Type, Self::Error> {
+        // computed before `new` is partially moved below
+        let ends_at = new.ends_at();
         Ok(sqlx::query_as!(
             PostgresEvent,
             r#"
-            INSERT INTO event (id, created_date_time, modification_date_time, program_id, event_name, priority, targets, report_descriptors, payload_descriptors, interval_period, intervals, duration)
-            VALUES (gen_random_uuid(), now(), now(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO event (id, created_date_time, modification_date_time, program_id, event_name, priority, targets, report_descriptors, payload_descriptors, interval_period, intervals, duration, ends_at)
+            VALUES (gen_random_uuid(), now(), now(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING
                 id,
                 created_date_time,
@@ -156,6 +158,7 @@ impl Crud for PgEventStorage {
             to_json_value(new.interval_period)?,
             serde_json::to_value(&new.intervals).map_err(AppError::SerdeJsonBadRequest)?,
             new.duration.map(|d| d.to_string()),
+            ends_at,
         )
             .fetch_one(&self.db)
             .await?
@@ -195,6 +198,8 @@ impl Crud for PgEventStorage {
         new: Self::NewType,
         _client_id: &Self::PermissionFilter,
     ) -> Result<Self::Type, Self::Error> {
+        // computed before `new` is partially moved below
+        let ends_at = new.ends_at();
         Ok(sqlx::query_as!(
             PostgresEvent,
             r#"
@@ -208,7 +213,8 @@ impl Crud for PgEventStorage {
                 payload_descriptors = $7,
                 interval_period = $8,
                 intervals = $9,
-                duration = $10
+                duration = $10,
+                ends_at = $11
             WHERE id = $1
             RETURNING
                 id,
@@ -233,7 +239,8 @@ impl Crud for PgEventStorage {
             to_json_value(new.payload_descriptors)?,
             to_json_value(new.interval_period)?,
             serde_json::to_value(&new.intervals).map_err(AppError::SerdeJsonBadRequest)?,
-            new.duration.map(|d| d.to_string())
+            new.duration.map(|d| d.to_string()),
+            ends_at
         )
         .fetch_one(&self.db)
         .await?
@@ -318,6 +325,12 @@ impl PgEventStorage {
                         -- or IF the event targets are empty
                         OR array_length(e.targets, 1) IS NULL
                   )
+              -- GB-04: the active filter runs inside this query, so it composes with
+              -- OFFSET/LIMIT below. Filtering after pagination returns short or wrong pages.
+              -- ends_at IS NULL means open-ended, i.e. always active.
+              AND ($6::bool IS NULL
+                   OR ($6 AND (e.ends_at IS NULL OR e.ends_at > now()))
+                   OR (NOT $6 AND e.ends_at IS NOT NULL AND e.ends_at <= now()))
             ORDER BY priority ASC, created_date_time DESC
             OFFSET $4 LIMIT $5
             "#,
@@ -325,7 +338,8 @@ impl PgEventStorage {
             filter_targets as _,
             ven_targets as _,
             filter.skip,
-            filter.limit
+            filter.limit,
+            filter.active,
         )
         .fetch_all(&self.db)
         .await?
@@ -423,13 +437,20 @@ impl PgEventStorage {
               -- IF filter targets are empty, do not filter.
               -- IF filter targets are not empty, filter only if they are in the event targets.
               AND (array_length($2::text[], 1) IS NULL OR e.targets && $2)
+              -- GB-04: the active filter runs inside this query, so it composes with
+              -- OFFSET/LIMIT below. Filtering after pagination returns short or wrong pages.
+              -- ends_at IS NULL means open-ended, i.e. always active.
+              AND ($5::bool IS NULL
+                   OR ($5 AND (e.ends_at IS NULL OR e.ends_at > now()))
+                   OR (NOT $5 AND e.ends_at IS NOT NULL AND e.ends_at <= now()))
             ORDER BY priority ASC, created_date_time DESC
             OFFSET $3 LIMIT $4
             "#,
             filter.program_id.as_ref().map(|id| id.as_str()),
             filter.targets.as_deref() as _,
             filter.skip,
-            filter.limit
+            filter.limit,
+            filter.active,
         )
         .fetch_all(&self.db)
         .await?
@@ -492,6 +513,7 @@ mod tests {
                 targets: TargetQueryParams(None),
                 skip: 0,
                 limit: 50,
+                active: None,
             }
         }
     }
@@ -633,6 +655,84 @@ mod tests {
                 events,
                 vec![event_1(), event_2(), event_3(), event_4(), event_5()]
             );
+        }
+
+        // GB-04: the active filter. In the fixture only event-1 has an ends_at in the
+        // past; events 2-5 are open-ended (ends_at NULL), which counts as always active.
+
+        #[sqlx::test(fixtures("programs", "events"))]
+        async fn active_filter_true_get_all(db: PgPool) {
+            let repo: PgEventStorage = db.into();
+            let mut events = repo
+                .retrieve_all(
+                    &QueryParams {
+                        active: Some(true),
+                        ..Default::default()
+                    },
+                    &None,
+                )
+                .await
+                .unwrap();
+            events.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+            assert_eq!(events, vec![event_2(), event_3(), event_4(), event_5()]);
+        }
+
+        #[sqlx::test(fixtures("programs", "events"))]
+        async fn active_filter_false_get_all(db: PgPool) {
+            let repo: PgEventStorage = db.into();
+            let events = repo
+                .retrieve_all(
+                    &QueryParams {
+                        active: Some(false),
+                        ..Default::default()
+                    },
+                    &None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(events, vec![event_1()]);
+        }
+
+        #[sqlx::test(fixtures("programs", "events"))]
+        async fn active_filter_combined_with_pagination(db: PgPool) {
+            // Regression for the original bug: OFFSET/LIMIT used to run in SQL before the
+            // (then Rust-side) active filter, so a page could come back short or carry
+            // rows from the wrong page. Paging through active events one at a time must
+            // yield every active event exactly once and never the inactive one.
+            let repo: PgEventStorage = db.into();
+            let mut seen = Vec::new();
+            for skip in 0..4 {
+                let page = repo
+                    .retrieve_all(
+                        &QueryParams {
+                            active: Some(true),
+                            skip,
+                            limit: 1,
+                            ..Default::default()
+                        },
+                        &None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(page.len(), 1, "page at skip={skip} came back short");
+                seen.push(page.into_iter().next().unwrap());
+            }
+            seen.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+            assert_eq!(seen, vec![event_2(), event_3(), event_4(), event_5()]);
+
+            let past_end = repo
+                .retrieve_all(
+                    &QueryParams {
+                        active: Some(true),
+                        skip: 4,
+                        limit: 1,
+                        ..Default::default()
+                    },
+                    &None,
+                )
+                .await
+                .unwrap();
+            assert!(past_end.is_empty());
         }
 
         #[sqlx::test(fixtures("programs", "events"))]

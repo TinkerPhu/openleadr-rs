@@ -1,5 +1,5 @@
 INSERT INTO event (id, created_date_time, modification_date_time, program_id, event_name, priority, targets,
-                   report_descriptors, payload_descriptors, interval_period, intervals)
+                   report_descriptors, payload_descriptors, interval_period, intervals, ends_at)
 VALUES ('event-1',
         '2024-07-25 08:31:10.776000 +00:00',
         '2024-07-25 08:31:10.776000 +00:00',
@@ -31,7 +31,8 @@ VALUES ('event-1',
               "randomizeStart": "P0Y0M0DT1H0M0S"
             }
           }
-        ]'::jsonb),
+        ]'::jsonb,
+        '2023-06-15T10:30:00+00:00'::timestamptz),
        ('event-2',
         '2024-07-25 08:31:10.776000 +00:00',
         '2024-07-25 08:31:10.776000 +00:00',
@@ -54,7 +55,8 @@ VALUES ('event-1',
               }
             ]
           }
-        ]'::jsonb),
+        ]'::jsonb,
+        null),
        ('event-3',
         '2024-07-25 08:31:10.776000 +00:00',
         '2024-07-25 08:31:10.776000 +00:00',
@@ -77,7 +79,8 @@ VALUES ('event-1',
               }
             ]
           }
-        ]'::jsonb),
+        ]'::jsonb,
+        null),
        ('event-4',
         '2024-07-25 08:31:10.776000 +00:00',
         '2024-07-25 08:31:10.776000 +00:00',
@@ -100,7 +103,8 @@ VALUES ('event-1',
               }
             ]
           }
-        ]'::jsonb),
+        ]'::jsonb,
+        null),
        ('event-5',
         '2024-07-25 08:31:10.776000 +00:00',
         '2024-07-25 08:31:10.776000 +00:00',
@@ -123,4 +127,5 @@ VALUES ('event-1',
               }
             ]
           }
-        ]'::jsonb);
+        ]'::jsonb,
+        null);

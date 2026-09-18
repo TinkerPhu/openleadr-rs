@@ -172,6 +172,10 @@ pub struct QueryParams {
     #[validate(range(min = 1, max = 50))]
     #[serde(default = "get_50")]
     pub(crate) limit: i64,
+    /// Filter by active status. `true` returns only events that are currently active
+    /// (open-ended, or with an end instant still in the future); `false` returns only
+    /// events that have ended. Absent returns all events.
+    pub(crate) active: Option<bool>,
 }
 
 fn get_50() -> i64 {
@@ -219,6 +223,7 @@ mod test {
                 ])),
                 skip: 1,
                 limit: 2,
+                active: None,
             }
         );
 
