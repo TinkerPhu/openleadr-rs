@@ -12,6 +12,8 @@ COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # --- Stage 2: cook (compile dependencies only) ---
+# Cooks the SAME feature set the builder uses below: a mismatch means the cooked
+# dependency cache does not match what the build needs, and it recompiles anyway.
 # Two-layer caching strategy:
 #   * cargo-chef layer cache: hits when Cargo.toml/Cargo.lock unchanged (fast path)
 #   * BuildKit cache mounts: warm cargo cache even on layer-cache miss (source-only change)
@@ -23,20 +25,37 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
     SQLX_OFFLINE=true RUSTFLAGS="-Ctarget-feature=-crt-static" \
-    cargo chef cook --release --recipe-path recipe.json
+    cargo chef cook --release --recipe-path recipe.json \
+      --no-default-features \
+      --features postgres,internal-oauth,compression-br,compression-deflate,compression-gzip,compression-zstd
 
 # --- Stage 3: build (compile application code only) ---
-# `internal-oauth` is NOT in the crate's default features: it gates POST /auth/token
-# and the whole /users tree. The lab authenticates every VEN, the BFF, the seed script
-# and all BDD steps through that endpoint, so the flag is mandatory here -- without it
-# the image builds fine and then 404s on every token request.
+# The feature list is spelled out rather than inherited, for two reasons that pull
+# in opposite directions:
+#
+#   * `internal-oauth` is NOT a default. It gates POST /auth/token and the whole
+#     /users tree, and the lab authenticates every VEN, the BFF, the seed script
+#     and every BDD step through that endpoint -- without it the image builds
+#     fine and then 404s on every token request.
+#   * `experimental-websockets` IS a default, and is deliberately dropped.
+#     Upstream's own note on it reads "object privacy is not yet implemented",
+#     so what that transport delivers is not filtered the way every REST read is.
+#     The lab creates no subscriptions today, so the route can deliver nothing,
+#     making it a transport with no consumer (`no-half-built-features`).
+#     Re-enable it deliberately, with the privacy question answered, if
+#     subscriptions are adopted (design.md Q3).
+#
+# Everything else is upstream's default set, restated so a future upstream change
+# to those defaults shows up here as a conflict rather than silently.
 FROM cook AS builder
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
     SQLX_OFFLINE=true RUSTFLAGS="-Ctarget-feature=-crt-static" \
-    cargo build --release --bin openleadr-vtn --features internal-oauth && \
+    cargo build --release --bin openleadr-vtn \
+      --no-default-features \
+      --features postgres,internal-oauth,compression-br,compression-deflate,compression-gzip,compression-zstd && \
     cp target/release/openleadr-vtn /openleadr-vtn
 
 # --- Stage 4: minimal runtime image ---
